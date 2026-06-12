@@ -4,13 +4,14 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Llama-3.2 On-Device Chat</title>
-  <!-- WebLLMの読み込み (CDN経由) -->
+  
+  <!-- WebLLMの読み込みエラーを防ぐ安定版CDN指定 -->
   <script type="module">
-    import * as webllm from "https://esm.run";
+    import * as webllm from "https://jsdelivr.net";
     window.webllm = webllm;
   </script>
+
   <style>
-    /* CSSによるデザイン（軽さを維持しつつ、色と影でSF風に） */
     :root {
       --bg-color: #0d0f12;
       --panel-color: #161a22;
@@ -52,7 +53,6 @@
       box-shadow: 0 0 30px rgba(0, 0, 0, 0.5), 0 0 1px var(--accent-color);
     }
 
-    /* ヘッダーエリア */
     header {
       padding: 20px;
       border-bottom: 1px solid var(--border-color);
@@ -65,7 +65,6 @@
       font-size: 1.25rem;
       font-weight: 600;
       letter-spacing: 1px;
-      color: var(--text-main);
       text-transform: uppercase;
     }
     h1 span {
@@ -73,7 +72,6 @@
       text-shadow: 0 0 8px var(--accent-glow);
     }
 
-    /* ステータスバッジ */
     .status-badge {
       font-size: 0.75rem;
       padding: 6px 12px;
@@ -96,7 +94,35 @@
       box-shadow: 0 0 8px var(--accent-color);
     }
 
-    /* チャット表示エリア */
+    /* 新設：プログレスバー用のエリア */
+    .progress-container {
+      padding: 15px 20px;
+      background: rgba(0, 0, 0, 0.3);
+      border-bottom: 1px solid var(--border-color);
+    }
+    .progress-info {
+      display: flex;
+      justify-content: space-between;
+      font-size: 0.85rem;
+      margin-bottom: 8px;
+      color: var(--text-main);
+    }
+    .progress-bar-bg {
+      width: 100%;
+      height: 8px;
+      background: #090b0e;
+      border-radius: 4px;
+      overflow: hidden;
+      border: 1px solid var(--border-color);
+    }
+    .progress-bar-fill {
+      width: 0%;
+      height: 100%;
+      background: var(--accent-color);
+      box-shadow: 0 0 10px var(--accent-color);
+      transition: width 0.3s ease;
+    }
+
     .chat-box {
       flex: 1;
       padding: 20px;
@@ -107,7 +133,6 @@
       scroll-behavior: smooth;
     }
 
-    /* メッセージの共通デザイン */
     .message {
       max-width: 80%;
       padding: 12px 16px;
@@ -132,13 +157,12 @@
       align-self: center;
       background: transparent;
       color: var(--accent-color);
-      font-size: 0.8rem;
+      font-size: 0.85rem;
       border: none;
       text-align: center;
       max-width: 100%;
     }
 
-    /* 入力エリア */
     .input-area {
       padding: 20px;
       border-top: 1px solid var(--border-color);
@@ -183,10 +207,6 @@
     button:hover:not(:disabled) {
       background: #00e6b8;
       box-shadow: 0 0 15px var(--accent-color);
-      transform: translateY(-1px);
-    }
-    button:active:not(:disabled) {
-      transform: translateY(0);
     }
     button:disabled {
       background: var(--border-color);
@@ -207,67 +227,42 @@
       </div>
     </header>
 
-    <div class="chat-box" id="chatBox">
-      <div class="message system" id="progressMsg">システムを準備しています... しばらくお待ちください。</div>
+    <!-- プログレスバーのHTML構造 -->
+    <div class="progress-container" id="progressContainer">
+      <div class="progress-info">
+        <span id="progressText">ブラウザの検証中...</span>
+        <span id="progressPercent">0%</span>
+      </div>
+      <div class="progress-bar-bg">
+        <div class="progress-bar-fill" id="progressBarFill"></div>
+      </div>
     </div>
 
+    <div class="chat-box" id="chatBox"></div>
+
     <div class="input-area">
-      <input type="text" id="userInput" placeholder="AIにメッセージを送信..." disabled>
+      <input type="text" id="userInput" placeholder="モデルの読込をお待ちください..." disabled>
       <button id="sendBtn" disabled>送信</button>
     </div>
   </div>
 
   <script type="module">
-    // 超軽量設計のLlama-3.2-1Bモデルを指定
     const SELECTED_MODEL = "Llama-3.2-1B-Instruct-q4f16_1";
-    
-    // 前回の軽さ戦略に基づき、コンテキストウィンドウ（記憶容量）を1024トークンに制限してGPUを節約
-    const ENGINE_CONFIG = {
-      context_window_size: 1024
-    };
+    const ENGINE_CONFIG = { context_window_size: 1024 };
 
     let engine = null;
     const chatHistory = [];
 
     const chatBox = document.getElementById("chatBox");
-    const progressMsg = document.getElementById("progressMsg");
+    const progressContainer = document.getElementById("progressContainer");
+    const progressText = document.getElementById("progressText");
+    const progressPercent = document.getElementById("progressPercent");
+    const progressBarFill = document.getElementById("progressBarFill");
     const userInput = document.getElementById("userInput");
     const sendBtn = document.getElementById("sendBtn");
     const statusDot = document.getElementById("statusDot");
     const statusText = document.getElementById("statusText");
 
-    // 初期化とモデルロード
-    async function initAI() {
-      try {
-        if (!navigator.gpu) {
-          progressMsg.innerText = "エラー: お使いのブラウザはWebGPUに対応していません。ChromeかEdgeの最新版をお使いください。";
-          return;
-        }
-
-        // WebLLMエンジンの作成 (進捗コールバックを設定)
-        engine = await window.webllm.CreateEngine(SELECTED_MODEL, {
-          appConfig: ENGINE_CONFIG,
-          initProgressCallback: (report) => {
-            progressMsg.innerText = `モデルを読み込み中... (${report.text})`;
-          }
-        });
-
-        // 読み込み完了時のUI変更
-        progressMsg.style.display = "none";
-        statusDot.classList.add("ready");
-        statusText.innerText = "オンライン (ローカル)";
-        userInput.disabled = false;
-        sendBtn.disabled = false;
-        userInput.placeholder = "メッセージを入力...";
-        appendMessage("system", "Llama-3.2とのローカル接続が完了しました。端末内ですべて処理されます。");
-
-      } catch (error) {
-        console.error(error);
-        progressMsg.innerText = "初期化中にエラーが発生しました。コンソールを確認してください。";
-      }
-    }
-
-    // チャット画面へのメッセージ追加
     function appendMessage(sender, text) {
       const msgDiv = document.createElement("div");
       msgDiv.classList.add("message", sender);
@@ -277,25 +272,60 @@
       return msgDiv;
     }
 
-    // 送信処理
+    async function initAI() {
+      // 1. WebGPU対応チェック
+      if (!navigator.gpu) {
+        progressText.innerText = "不可: WebGPU非対応です。Chrome / Edge の最新版をお使いください。";
+        progressText.style.color = "#ff4a4a";
+        return;
+      }
+
+      progressText.innerText = "ライブラリのセットアップ中...";
+
+      try {
+        // 2. WebLLMエンジンの初期化とダウンロード進捗監視
+        engine = await window.webllm.CreateEngine(SELECTED_MODEL, {
+          appConfig: ENGINE_CONFIG,
+          initProgressCallback: (report) => {
+            // report.text に現在の詳細ステータスが入る
+            progressText.innerText = report.text;
+            
+            // 進捗数値（0〜1）をパーセント（0〜100%）に変換してバーに反映
+            const percent = Math.round(report.progress * 100);
+            progressBarFill.style.width = `${percent}%`;
+            progressPercent.innerText = `${percent}%`;
+          }
+        });
+
+        // 3. 完了処理（プログレスバーを非表示にする）
+        progressContainer.style.display = "none";
+        statusDot.classList.add("ready");
+        statusText.innerText = "オンライン (ローカル)";
+        userInput.disabled = false;
+        sendBtn.disabled = false;
+        userInput.placeholder = "メッセージを入力...";
+        appendMessage("system", "Llama-3.2とのローカル接続に成功しました！");
+
+      } catch (error) {
+        console.error(error);
+        progressText.innerText = "エラー: ダウンロードが遮断されました。ネット環境をご確認ください。";
+        progressText.style.color = "#ff4a4a";
+      }
+    }
+
     async function handleSend() {
       const text = userInput.value.trim();
       if (!text || sendBtn.disabled) return;
 
-      // 入力の無効化とユーザー発言の追加
       userInput.value = "";
       userInput.disabled = true;
       sendBtn.disabled = true;
       appendMessage("user", text);
-
-      // 記憶の管理（コンテキスト制限を破らないための簡易履歴保存）
       chatHistory.push({ role: "user", content: text });
 
-      // AI応答用の空の吹き出しを先に作る
       const aiMessageDiv = appendMessage("ai", "⚡ 思考中...");
 
       try {
-        // ストリーミング形式で文字を順次出力
         const completion = await engine.chat.completions.create({
           messages: chatHistory,
           stream: true
@@ -303,16 +333,14 @@
 
         let aiResponse = "";
         for await (const chunk of completion) {
-          const content = chunk.choices[0]?.delta?.content || "";
+          const content = chunk.choices?.delta?.content || "";
           aiResponse += content;
-          aiMessageDiv.innerText = aiResponse; // リアルタイムに文字を書き換え
+          aiMessageDiv.innerText = aiResponse;
           chatBox.scrollTop = chatBox.scrollHeight;
         }
 
-        // AIの最終回答を履歴に保存
         chatHistory.push({ role: "assistant", content: aiResponse });
 
-        // 会話履歴が長くなりすぎたら古いものを消す（軽量化対策）
         if (chatHistory.length > 8) {
           chatHistory.shift();
           chatHistory.shift();
@@ -320,22 +348,19 @@
 
       } catch (error) {
         console.error(error);
-        aiMessageDiv.innerText = "⚠️ エラーが発生しました。再試行してください。";
+        aiMessageDiv.innerText = "⚠️ 応答生成中にエラーが起きました。";
       } finally {
-        // 入力枠を再有効化
         userInput.disabled = false;
         sendBtn.disabled = false;
         userInput.focus();
       }
     }
 
-    // イベントリスナー設定
     sendBtn.addEventListener("click", handleSend);
     userInput.addEventListener("keypress", (e) => {
       if (e.key === "Enter") handleSend();
     });
 
-    // 起動
     initAI();
   </script>
 </body>
